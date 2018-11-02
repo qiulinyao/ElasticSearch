@@ -1,0 +1,525 @@
+
+import com.alibaba.fastjson.JSONObject;
+import com.zts.essearch.common.utils.CollectionUtil;
+import com.zts.essearch.common.utils.Const;
+import com.zts.essearch.entity.ResponseHits;
+import org.apache.log4j.Logger;
+import org.elasticsearch.action.bulk.BulkRequestBuilder;
+import org.elasticsearch.action.bulk.BulkResponse;
+import org.elasticsearch.action.delete.DeleteRequest;
+import org.elasticsearch.action.delete.DeleteResponse;
+import org.elasticsearch.action.get.GetResponse;
+import org.elasticsearch.action.index.IndexRequest;
+import org.elasticsearch.action.index.IndexRequestBuilder;
+import org.elasticsearch.action.search.MultiSearchResponse;
+import org.elasticsearch.action.search.SearchRequestBuilder;
+import org.elasticsearch.action.search.SearchResponse;
+import org.elasticsearch.action.update.UpdateRequest;
+import org.elasticsearch.action.update.UpdateResponse;
+import org.elasticsearch.client.transport.TransportClient;
+import org.elasticsearch.common.unit.Fuzziness;
+import org.elasticsearch.common.xcontent.XContentType;
+import org.elasticsearch.index.query.MultiMatchQueryBuilder;
+import org.elasticsearch.index.query.Operator;
+import org.elasticsearch.index.query.QueryBuilder;
+import org.elasticsearch.index.query.QueryBuilders;
+import org.elasticsearch.search.SearchHit;
+import org.elasticsearch.search.SearchHits;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+import org.springframework.util.StringUtils;
+
+import java.util.*;
+
+
+/**
+ * Elasticsearch的基本测试
+ * @ClassName: ElasticsearchTest1
+ * @version V1.0
+ */
+
+@Service
+public class SearchService {
+
+    private Logger logger = Logger.getLogger(SearchService.class);
+
+    @Autowired
+    private TransportClient client;
+
+
+    /**
+     * 添加数据到Elasticsearch
+     * @param index        索引
+     * @param type        类型
+     * @param idName    Id字段名称
+     * @param json        存储的JSON，可以接受Map
+     * @return
+     */
+    public void save(String index, String type, String idName,JSONObject json) {
+        List<JSONObject> list = new ArrayList();
+        list.add(json);
+        save(index, type, idName, list);
+    }
+
+
+    /**
+     * 添加数据到Elasticsearch
+     * @param index        索引
+     * @param type        类型
+     * @param idName    Id字段名称
+     * @param listData  一个对象集合
+     * @return
+     */
+    @SuppressWarnings("unchecked")
+    public void save(String index, String type, String idName, List<JSONObject> listData) {
+        BulkRequestBuilder bulkRequest = client.prepareBulk();
+
+        for (JSONObject jsonObject : listData) {
+            //logger.info("jsonObject="+jsonObject.toJSONString());
+            //没有指定idName 那就让Elasticsearch自动生成
+            if(StringUtils.isEmpty(idName)){
+                IndexRequestBuilder lrb = client.prepareIndex(index, type).setSource(jsonObject);
+                bulkRequest.add(lrb);
+            }
+            else{
+                IndexRequestBuilder lrb = client.prepareIndex(index, type, idName).setSource(jsonObject);
+                bulkRequest.add(lrb);
+            }
+        }
+
+        BulkResponse bulkResponse = bulkRequest.execute().actionGet();
+        if (bulkResponse.hasFailures()) {
+            // process failures by iterating through each bulk response item
+            logger.error("index:"+index+",type:"+type+",idName:"+idName+",listData:"+listData+" save failed"+bulkResponse.buildFailureMessage());
+        }else {
+            logger.info("index:"+index+",type:"+type+",idName:"+idName+",listData:"+listData+" save success");
+        }
+    }
+
+
+    /**
+     * 更新索引库数据
+     * @Title: updateData
+     * @return void
+     */
+    public void update(String index, String type, String idName,JSONObject json) {
+
+        UpdateResponse updateResponse = client.prepareUpdate(index, type, idName).setDoc(json, XContentType.JSON).get();
+
+        logger.info("index:"+index+",type:"+type+",idName:"+idName+",data:"+json+" update success");
+    }
+
+    public void upsert(String index, String type, String idName,JSONObject json) throws Exception{
+
+        IndexRequest indexRequest = new IndexRequest(index, type).source(json);
+        UpdateRequest updateRequest = new UpdateRequest(index, type, idName).doc(json).upsert(indexRequest); //如果不存在此文档 ，就增加 `indexRequest`
+
+        UpdateResponse updateResponse = client.update(updateRequest).get();
+
+        logger.info("index:"+index+",type:"+type+",idName:"+idName+",data:"+json+" upsert success");
+    }
+
+    /**
+     * 根据索引名称，类别，文档ID 删除索引库的数据
+     * @Title: deleteData
+     * @return void
+     */
+    public void delete(String index, String type, String idName) {
+        DeleteResponse deleteResponse = client.prepareDelete(index, type, idName).get();
+
+        logger.info("index:"+index+",type:"+type+",idName:"+idName+" delete success");
+    }
+
+    /**
+     * 根据索引名和type删除该索引数据
+     * @param indexname 索引名
+     * @param type 类型名
+     */
+    public void delIndexs(String indexname,String type) {
+        try {
+            QueryBuilder query = QueryBuilders.matchAllQuery();
+            SearchResponse searchResponse = client.prepareSearch(indexname).setTypes(type).setQuery(query)//.setScroll(new TimeValue(10000 ))
+                    .setFrom(0).setSize(5000).execute().actionGet();
+            //查询到的结果集合
+            SearchHits hits = searchResponse.getHits();
+            SearchHit[] searchHists = hits.getHits();
+            System.out.println("index:"+indexname+",type:"+type+"查询到记录数=" + hits.getTotalHits() + "=====" + searchHists.length);
+
+            if(hits.getTotalHits() == 0){
+                return;
+            }
+
+            BulkRequestBuilder brb = client.prepareBulk();
+
+            for(SearchHit hit : searchHists){
+                brb.add(new DeleteRequest(indexname,type,hit.getId()));
+            }
+            //执行
+            brb.get();
+            //递归删除
+            delIndexs(indexname,type);
+        }
+        catch (Exception e) {
+            logger.error(e.getMessage());
+            throw e;
+        }
+    }
+
+    public void getData4() {
+        GetResponse getResponse = client.prepareGet("qq", "tweet", "1").get();
+        logger.info("索引库的数据:" + getResponse.getSourceAsString());
+    }
+
+    /**
+     * match All, 匹配所有文档
+     * @Params: index,type
+     * @return void
+     */
+    public ResponseHits matchAll(String indexName,String indexType) {
+        long startTime=System.currentTimeMillis();   //获取开始时间
+        logger.info("matchAll, start time:"+startTime);
+
+        QueryBuilder qb = QueryBuilders.matchAllQuery();
+        SearchResponse searchResponse = client.prepareSearch(indexName).setTypes(indexType).setQuery(qb).get();
+        SearchHits hits = searchResponse.getHits();
+        long totalHits = hits.getTotalHits();
+
+        List<SearchHit> searchHitList = new ArrayList<>();
+        for (SearchHit sh:hits) {
+            searchHitList.add(sh);
+            logger.info("totalHits: "+totalHits+", Id: "+sh.getId()+", Score: "+sh.getScore());
+        }
+
+        ResponseHits responseHits = new ResponseHits();
+        responseHits.setTotalCount(totalHits);
+        responseHits.setSearchHitList(searchHitList);
+
+        long endTime=System.currentTimeMillis(); //获取结束时间
+        logger.info("matchAll, execute consume: "+(endTime-startTime)+" ms");
+
+        return responseHits;
+    }
+
+    /**
+     * match query
+     * @Params: index,type
+     * @return void
+     */
+    public ResponseHits matchQuery(String indexName,String indexType,String name,Object text, int from,int size) {
+        long startTime=System.currentTimeMillis();   //获取开始时间
+        logger.info("matchQuery, start time:"+startTime);
+
+        QueryBuilder qb = QueryBuilders.matchQuery(name,text);
+        SearchResponse searchResponse = client.prepareSearch(indexName).setTypes(indexType).setQuery(qb).setFrom(from).setSize(size).get();
+        SearchHits hits = searchResponse.getHits();
+        long totalHits = hits.getTotalHits();
+
+        List<SearchHit> searchHitList = new ArrayList<>();
+        for (SearchHit sh:hits) {
+            searchHitList.add(sh);
+            logger.info("totalHits: "+totalHits+", Id: "+sh.getId()+", Score: "+sh.getScore());
+        }
+
+        ResponseHits responseHits = new ResponseHits();
+        responseHits.setTotalCount(totalHits);
+        responseHits.setSearchHitList(searchHitList);
+
+        long endTime=System.currentTimeMillis(); //获取结束时间
+        logger.info("matchQuery, execute consume: "+(endTime-startTime)+" ms");
+
+        return responseHits;
+    }
+
+    /**
+     * match Multi Query
+     * @Params: index,type,text,fields
+     * @return void
+     */
+    public ResponseHits matchMultiQuery(String indexName,String indexType,String[] fieldNames,Object text, int from,int size) {
+        long startTime=System.currentTimeMillis();   //获取开始时间
+        logger.info("matchMultiQuery, start time:"+startTime);
+
+        //query = phrase（短语查询）, slop(查询词条移动多少次，相隔多远仍被视为匹配) = 2
+        QueryBuilder qb = QueryBuilders.multiMatchQuery(text, fieldNames).type(MultiMatchQueryBuilder.Type.PHRASE_PREFIX).operator(Operator.OR);//.slop(5);
+        SearchResponse searchResponse = client.prepareSearch(indexName).setTypes(indexType).setQuery(qb).setFrom(from).setSize(size).get();
+        SearchHits hits = searchResponse.getHits();
+        long totalHits = hits.getTotalHits();
+
+        List<SearchHit> searchHitList = new ArrayList<>();
+        for (SearchHit sh:hits) {
+            searchHitList.add(sh);
+            logger.info("totalHits: "+totalHits+", Id: "+sh.getId()+", Score: "+sh.getScore());
+        }
+
+        ResponseHits responseHits = new ResponseHits();
+        responseHits.setTotalCount(totalHits);
+        responseHits.setSearchHitList(searchHitList);
+
+        long endTime=System.currentTimeMillis(); //获取结束时间
+        logger.info("matchMultiQuery, execute consume: "+(endTime-startTime)+" ms");
+
+        return responseHits;
+    }
+
+    public ResponseHits stockQuery(String indexName,String indexType,String[] fieldNames,Object text, int from,int size) {
+        long startTime=System.currentTimeMillis();   //获取开始时间
+        logger.info("stockQuery, start time:"+startTime);
+
+        //query = phrase（短语查询）, slop(查询词条移动多少次，相隔多远仍被视为匹配) = 2
+        QueryBuilder qb0 = QueryBuilders.matchPhrasePrefixQuery(fieldNames[0],text).slop(10);
+        QueryBuilder qb1 = QueryBuilders.matchQuery(fieldNames[1],text);
+
+        SearchResponse searchResponse = client.prepareSearch(indexName).setTypes(indexType).setQuery(qb0).setQuery(qb1).setFrom(from).setSize(size).get();
+        SearchHits hits = searchResponse.getHits();
+        long totalHits = hits.getTotalHits();
+
+        List<SearchHit> searchHitList = new ArrayList<>();
+        for (SearchHit sh:hits) {
+            searchHitList.add(sh);
+            logger.info("totalHits: "+totalHits+", Id: "+sh.getId()+", Score: "+sh.getScore());
+        }
+
+        ResponseHits responseHits = new ResponseHits();
+        responseHits.setTotalCount(totalHits);
+        responseHits.setSearchHitList(searchHitList);
+
+        long endTime=System.currentTimeMillis(); //获取结束时间
+        logger.info("stockQuery, execute consume: "+(endTime-startTime)+" ms");
+
+        return responseHits;
+    }
+
+    /**
+     * term 短语查询：对query的词不经过分词，去指定字段的倒排中准确的匹配，一般对于该类查询建议使用过滤器，因为过滤器有缓存工程，可以提高性能。
+     * @Params: index,type
+     * @return void
+     */
+    public ResponseHits termQuery(String indexName,String indexType,String name,String queryStr, int from,int size) {
+        long startTime=System.currentTimeMillis();   //获取开始时间
+        logger.info("termQuery, start time:"+startTime);
+
+        QueryBuilder qb = QueryBuilders.termsQuery(name,queryStr);
+        SearchResponse searchResponse = client.prepareSearch(indexName).setTypes(indexType).setQuery(qb).setFrom(from).setSize(size).get();
+        SearchHits hits = searchResponse.getHits();
+        long totalHits = hits.getTotalHits();
+
+        List<SearchHit> searchHitList = new ArrayList<>();
+        for (SearchHit sh:hits) {
+            searchHitList.add(sh);
+            logger.info("totalHits: "+totalHits+", Id: "+sh.getId()+", Score: "+sh.getScore());
+        }
+
+        ResponseHits responseHits = new ResponseHits();
+        responseHits.setTotalCount(totalHits);
+        responseHits.setSearchHitList(searchHitList);
+
+        long endTime=System.currentTimeMillis(); //获取结束时间
+        logger.info("termQuery, execute consume: "+(endTime-startTime)+" ms");
+
+        return responseHits;
+    }
+
+    /**
+     * 前缀查询：对query的词不经过分词，去指定字段的倒排中匹配符合query词的前缀文档。
+     * @Params: index,type
+     * @return void
+     */
+    public void prefixQuery(String indexName,String indexType) {
+        QueryBuilder qb = QueryBuilders.prefixQuery("other","学");
+
+        SearchResponse searchResponse = client.prepareSearch(indexName).setTypes(indexType).setQuery(qb).get();
+        SearchHits hits = searchResponse.getHits();
+        long totalHits = hits.getTotalHits();
+        SearchHit[] hits2 = hits.getHits();
+        for (SearchHit sh:hits2) {
+            Map<String, Object> source = sh.getSource();
+
+            logger.info(totalHits+","+source+","+sh.getId()+","+sh.getScore());
+        }
+    }
+
+    /**
+     * 短语匹配：查询首先将查询字符串解析成一个词项列表，然后对这些词项进行搜索，但只保留那些包含 全部 搜索词项，且 位置 与搜索词项相同的文档。
+     *         默认中间不夹杂其他词项，可以通过slop设置位置距离（位置距离可以循环）
+     * @Params: index,type
+     * @return void
+     */
+    public ResponseHits matchPhraseQuery(String indexName,String indexType, String name,Object text, int from,int size) {
+        long startTime=System.currentTimeMillis();   //获取开始时间
+        logger.info("matchPhraseQuery, start time:"+startTime);
+        QueryBuilder qb = QueryBuilders.matchPhraseQuery(name,text).slop(2);
+        SearchResponse searchResponse = client.prepareSearch(indexName).setTypes(indexType).setQuery(qb).setFrom(from).setSize(size).get();
+        SearchHits hits = searchResponse.getHits();
+        long totalHits = hits.getTotalHits();
+
+        List<SearchHit> searchHitList = new ArrayList<>();
+        for (SearchHit sh:hits) {
+            searchHitList.add(sh);
+            logger.info("totalHits: "+totalHits+", Id: "+sh.getId()+", Score: "+sh.getScore());
+        }
+
+        ResponseHits responseHits = new ResponseHits();
+        responseHits.setTotalCount(totalHits);
+        responseHits.setSearchHitList(searchHitList);
+
+        long endTime=System.currentTimeMillis(); //获取结束时间
+        logger.info("matchPhraseQuery, execute consume: "+(endTime-startTime)+" ms");
+
+        return responseHits;
+    }
+
+    public ResponseHits matchThreePhraseQuery(String indexName,String indexType,String queryStr,String name0,String name1,String name2, int from,int size) {
+        long startTime=System.currentTimeMillis();   //获取开始时间
+        logger.info("matchThreePhraseQuery, start time:"+startTime);
+
+        int end = from+size;
+        SearchRequestBuilder srb1 = client.prepareSearch(indexName).setTypes(indexType).setQuery(QueryBuilders.matchPhraseQuery(name0, queryStr).slop(2)).setSize(end);
+        SearchRequestBuilder srb2 = client.prepareSearch(indexName).setTypes(indexType).setQuery(QueryBuilders.matchPhraseQuery(name1, queryStr).slop(2)).setSize(end);
+        SearchRequestBuilder srb3 = client.prepareSearch(indexName).setTypes(indexType).setQuery(QueryBuilders.matchPhraseQuery(name2, queryStr).slop(2)).setSize(end);
+
+        MultiSearchResponse sr = client.prepareMultiSearch().add(srb1).add(srb2).add(srb3).get();
+
+        logger.info("sr.getResponses().length="+sr.getResponses().length);
+
+        // You will get all individual responses from MultiSearchResponse#getResponses()
+        long totalHits = 0;
+
+        List<SearchHit> searchHitList = new ArrayList<>();
+        for (MultiSearchResponse.Item item : sr.getResponses()) {
+            SearchResponse response = item.getResponse();
+
+            if (response != null){
+                SearchHits searchHits = response.getHits();
+                if(searchHits != null){
+                    totalHits += response.getHits().getTotalHits();
+
+                    for(SearchHit sh : searchHits){
+                        searchHitList.add(sh);
+                        logger.info("searchHits: "+response.getHits().getTotalHits()+", Id:"+sh.getId()+", Score: "+sh.getScore());
+                    }
+                }
+            }
+        }
+
+        //踢除重复元素
+        if(Const.INDEX_NEWSINFO.equals(indexName)){
+            searchHitList = CollectionUtil.removeDuplicateNewsinfo(searchHitList);
+        }else if(Const.INDEX_STOCK.equals(indexName)){
+            searchHitList = CollectionUtil.removeDuplicateStock(searchHitList);
+        }else if(Const.INDEX_FINANCE.equals(indexName)){
+            searchHitList = CollectionUtil.removeDuplicateFinance(searchHitList);
+        }
+
+        logger.info("踢除重复元素后,searchHitList.size= "+searchHitList.size());
+
+
+        totalHits = searchHitList.size();
+
+        //按照相关性得分降序排列
+        Collections.sort(searchHitList, new Comparator<SearchHit>() {
+            @Override
+            public int compare(SearchHit sh1, SearchHit sh2) {
+                if(sh1.getScore() > sh2.getScore()) return -1;
+                else return 1;
+            }
+        });
+
+        //得到结果list
+        List<SearchHit> resultList = new ArrayList<>();
+        if(totalHits >= end){
+            resultList = searchHitList.subList(from, end);
+        }else if(totalHits <= from){
+
+        }else {
+            resultList = searchHitList.subList(from, searchHitList.size());
+        }
+
+        ResponseHits responseHits = new ResponseHits();
+        responseHits.setTotalCount(totalHits);
+        responseHits.setSearchHitList(resultList);
+
+        logger.info("totalHits= "+totalHits);
+        long endTime=System.currentTimeMillis(); //获取结束时间
+        logger.info("matchThreePhraseQuery, execute consume: "+(endTime-startTime)+" ms");
+
+        return responseHits;
+    }
+
+    /**
+     * 短语前缀匹配：
+     * 1）查询首先将查询字符串解析成一个词项列表，然后对这些词项进行搜索，但只保留那些包含 全部 搜索词项，且 位置 与搜索词项相同的文档。
+     *   默认中间不夹杂其他词项，可以通过slop设置位置距离（位置距离可以循环）
+     * 2）还可以设置max_expansion 来决定前缀匹配的最大数量
+     * @Params: index,type
+     * @return void
+     */
+    public ResponseHits matchPhrasePrefixQuery(String indexName,String indexType, String name,Object text, int from,int size) {
+        long startTime=System.currentTimeMillis();   //获取开始时间
+        logger.info("matchPhraseQuery, start time:"+startTime);
+
+        QueryBuilder qb = QueryBuilders.matchPhrasePrefixQuery(name,text).slop(3).maxExpansions(2);
+        SearchResponse searchResponse = client.prepareSearch(indexName).setTypes(indexType).setQuery(qb).setFrom(from).setSize(size).get();
+        SearchHits hits = searchResponse.getHits();
+        long totalHits = hits.getTotalHits();
+
+        List<SearchHit> searchHitList = new ArrayList<>();
+        for (SearchHit sh:hits) {
+            searchHitList.add(sh);
+            logger.info("totalHits: "+totalHits+", Id: "+sh.getId()+", Score: "+sh.getScore());
+        }
+
+        ResponseHits responseHits = new ResponseHits();
+        responseHits.setTotalCount(totalHits);
+        responseHits.setSearchHitList(searchHitList);
+
+        long endTime=System.currentTimeMillis(); //获取结束时间
+        logger.info("matchPhraseQuery, execute consume: "+(endTime-startTime)+" ms");
+
+        return responseHits;
+    }
+
+    /**
+     * 模糊查询（fuzzy）：
+     * 对查询的词进行模糊处理（例如：输入jiva，但实际想查询java），es使用编辑距离来做模糊查询的条件,可以设置如下参数：
+     * 1）fuzziness：模糊度，推荐auto
+     * 2）prefixLength:不会“模糊化”的初始字符数,这有助于减少必须检查的术语数量,默认为0。
+     * 3）maxExpansions:模糊查询将扩展到的最大项数,默认为50。越小越有助于性能
+     * @Params: index,type
+     * @return void
+     */
+    public void fuzzyQuery(String indexName,String indexType,String title,String queryStr) {
+        logger.info("fuzzyQuery starts...");
+        QueryBuilder qb = QueryBuilders.fuzzyQuery(title,queryStr).fuzziness(Fuzziness.fromEdits(1)).prefixLength(0).maxExpansions(50);
+        SearchResponse searchResponse = client.prepareSearch(indexName).setTypes(indexType).setQuery(qb).get();
+        SearchHits hits = searchResponse.getHits();
+        long totalHits = hits.getTotalHits();
+        SearchHit[] hits2 = hits.getHits();
+
+        for (SearchHit sh:hits2) {
+            Map<String, Object> source = sh.getSource();
+
+            logger.info(totalHits+","+source+","+sh.getId()+","+sh.getScore());
+        }
+        logger.info("fuzzyQuery ends...");
+    }
+
+    /**
+     * 通配符查询（wildcard）: wildcard 和 regexp 查询的工作方式与 prefix 查询完全一样，它们也需要扫描倒排索引中的词列表才能找到所有匹配的词，
+     *                      然后依次获取每个词相关的文档 ID，与 prefix 查询的唯一不同是：它们能支持更为复杂的匹配模式。
+     * @Params: index,type
+     * @return void
+     */
+    public void wildCardQuery(String indexName,String indexType) {
+        QueryBuilder qb = QueryBuilders.wildcardQuery("title", "el*");
+        SearchResponse searchResponse = client.prepareSearch(indexName).setTypes(indexType).setQuery(qb).get();
+        SearchHits hits = searchResponse.getHits();
+        long totalHits = hits.getTotalHits();
+        SearchHit[] hits2 = hits.getHits();
+        for (SearchHit sh:hits2) {
+            Map<String, Object> source = sh.getSource();
+
+            logger.info(totalHits+","+source+","+sh.getId()+","+sh.getScore());
+        }
+    }
+
+}
